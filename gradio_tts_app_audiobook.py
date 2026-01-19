@@ -6230,11 +6230,36 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=[voice_audio, voice_exaggeration, voice_cfg, voice_temp, voice_min_p, voice_top_p, voice_repetition_penalty, voice_status]
     )
 
+
+    def generate_voice(model, text, audio, exag, tmp, cfg, min_p, top_p, rep):
+        return generate(
+            model=model,
+            text=text,
+            language_id=None,  # English default
+            audio_prompt_path=audio,
+            exaggeration=exag,
+            temperature=tmp,
+            seed_num=0,
+            cfgw=cfg,
+            min_p=min_p,
+            top_p=top_p,
+            repetition_penalty=rep
+        )
+
+
     test_voice_btn.click(
-        fn=lambda model, text, audio, exag, temp, cfg, min_p_val, top_p_val, rep_penalty: generate(model, text, audio, exag, temp, 0, cfg, min_p_val, top_p_val, rep_penalty),
-        inputs=[model_state, test_text, voice_audio, voice_exaggeration, voice_temp, voice_cfg, voice_min_p, voice_top_p, voice_repetition_penalty],
+        fn=generate_voice,
+        inputs=[model_state, test_text, voice_audio,
+                voice_exaggeration, voice_temp,
+                voice_cfg, voice_min_p, voice_top_p, voice_repetition_penalty],
         outputs=test_audio_output
     )
+
+    # test_voice_btn.click(
+    #     fn=lambda model, text, audio, exag, temp, cfg, min_p_val, top_p_val, rep_penalty: generate(model, text, audio, exag, temp, 0, cfg, min_p_val, top_p_val, rep_penalty),
+    #     inputs=[model_state, test_text, voice_audio, voice_exaggeration, voice_temp, voice_cfg, voice_min_p, voice_top_p, voice_repetition_penalty],
+    #     outputs=test_audio_output
+    # )
 
     save_voice_btn.click(
         fn=lambda path, name, display, desc, audio, exag, cfg, temp, enable_norm, target_level, min_p_val, top_p_val, rep_penalty: save_voice_profile(
