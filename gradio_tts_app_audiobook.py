@@ -232,19 +232,42 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
             text_segment = segment.strip()
             if text_segment:
                 # The new `generate` function handles conditioning internally.
-                wav = model.generate(
-                    text_segment,
-                    language_id=language_id,  # Pass language_id
-                    audio_prompt_path=audio_prompt_path,  # Pass audio path directly
-                    exaggeration=exaggeration,
-                    temperature=temperature,
-                    cfg_weight=cfgw,
-                    min_p=min_p,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                )
-                audio_np = wav.squeeze(0).numpy()
-                audio_segments.append(audio_np)
+                # Added simple retry logic for this segment in case of NaN errors
+                max_segment_retries = 2
+                segment_success = False
+
+                for attempt in range(max_segment_retries + 1):
+                    try:
+                        wav = model.generate(
+                            text_segment,
+                            language_id=language_id,  # Pass language_id
+                            audio_prompt_path=audio_prompt_path,  # Pass audio path directly
+                            exaggeration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfgw,
+                            min_p=min_p,
+                            top_p=top_p,
+                            repetition_penalty=repetition_penalty,
+                        )
+                        audio_np = wav.squeeze(0).numpy()
+                        audio_segments.append(audio_np)
+                        segment_success = True
+                        break
+                    except Exception as e:
+                        err_str = str(e)
+                        is_nan_error = "Audio buffer is not finite" in err_str or "input must be finite" in err_str
+                        if is_nan_error and attempt < max_segment_retries:
+                            print(f"⚠️ NaN error in TTS generation, retrying segment ({attempt+1}/{max_segment_retries})...")
+                            # Perturb seed slightly for retry
+                            if seed_num != 0:
+                                set_seed(int(seed_num) + attempt + 1)
+                            else:
+                                set_seed(random.randint(1, 10000))
+                            continue
+                        else:
+                            print(f"❌ Error generating segment: {err_str}")
+                            # Skip this segment or insert silence? Let's skip to avoid breaking the whole stream
+                            break
 
     if audio_segments:
         final_audio = np.concatenate(audio_segments)
@@ -670,7 +693,7 @@ def validate_text_for_generation(text, voice_name=""):
     return True, cleaned_text, "Valid"
 
 def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2):
-    """Generate audio with retry logic for CUDA errors and text validation"""
+    """Generate audio with retry logic for CUDA errors, text validation, and NaN/Librosa errors"""
     # import signal
     import numpy as np
     
@@ -707,7 +730,13 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
             # Clear memory before generation
             if retry > 0:
                 clear_gpu_memory()
-            
+                # If retrying a NaN error, modify the seed or temperature slightly
+                if retry > 0:
+                    set_seed(random.randint(1, 10000))
+                    # Occasionally vary params to unstuck the model
+                    if retry == max_retries - 1:
+                        temperature = max(0.1, temperature - 0.1)
+
             # Set timeout signal (only on Unix-like systems)
             # if hasattr(signal, 'SIGALRM'):
             #     signal.signal(signal.SIGALRM, timeout_handler)
@@ -749,18 +778,26 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                     silence_audio = np.zeros(silence_samples, dtype=np.float32)
                     return torch.tensor(silence_audio).unsqueeze(0)
             
-        except RuntimeError as e:
-            if ("srcIndex < srcSelectDimSize" in str(e) or 
-                "CUDA" in str(e) or 
-                "out of memory" in str(e).lower()):
-                
+        except Exception as e:
+            # Catch RuntimeError for GPU issues AND other exceptions like librosa ParameterError (NaNs)
+            error_str = str(e)
+            is_cuda_error = ("srcIndex < srcSelectDimSize" in error_str or
+                             "CUDA" in error_str or
+                             "out of memory" in error_str.lower())
+
+            # Check for Librosa/NaN errors: "Audio buffer is not finite" or "input must be finite"
+            is_nan_error = "Audio buffer is not finite" in error_str or "input must be finite" in error_str
+
+            if is_cuda_error or is_nan_error:
                 if retry < max_retries - 1:
-                    print(f"⚠️ GPU error, retry {retry + 1}/{max_retries}: {str(e)[:100]}...")
+                    error_type = "GPU" if is_cuda_error else "NaN/Librosa"
+                    print(f"⚠️ {error_type} error, retry {retry + 1}/{max_retries}: {error_str[:100]}...")
                     clear_gpu_memory()
                     continue
                 else:
-                    raise RuntimeError(f"Failed after {max_retries} retries: {str(e)}")
+                    raise RuntimeError(f"Failed after {max_retries} retries: {error_str}")
             else:
+                # Rethrow unknown errors
                 raise e
     
     raise RuntimeError("Generation failed after all retries")
@@ -865,9 +902,13 @@ def create_audiobook(
             chunk_words = len(chunk.split())
             status_msg = f"🎵 Processing chunk {i+1}/{total_chunks}\n🎭 Voice: {voice_config['display_name']}\n📝 Chunk {i+1}: {chunk_words} words\n📊 Progress: {i+1}/{total_chunks} chunks"
             status_updates.append(status_msg)
+            # Default to 'en' language if not specified in this old function signature
+            language_id_arg = 'en'
+
             wav = generate_with_retry(
                 model,
                 chunk,
+                language_id_arg, # Pass default language
                 voice_config['audio_file'],
                 voice_config['exaggeration'],
                 voice_config['temperature'],
@@ -1833,13 +1874,16 @@ def create_multi_voice_audiobook_with_assignments(
                 # Prepare conditionals from audio prompt
                 # conds = processing_model.prepare_conditionals(voice_config['audio_file'], voice_config['exaggeration'])
 
-                wav = processing_model.generate(
+                wav = generate_with_retry(
+                    processing_model,
                     chunk_text,
-                    language_id=language_id if language_id else 'en',  # Pass the language
-                    audio_prompt_path=voice_config['audio_file'],  # Pass audio path directly
-                    exaggeration=voice_config['exaggeration'],
-                    temperature=voice_config['temperature'],
-                    cfg_weight=voice_config['cfg_weight'])
+                    language_id if language_id else 'en',  # Pass the language
+                    voice_config['audio_file'],  # Pass audio path directly
+                    voice_config['exaggeration'],
+                    voice_config['temperature'],
+                    voice_config['cfg_weight'],
+                    max_retries=3
+                    )
                 audio_np = wav.squeeze(0).cpu().numpy()
             
             # Apply volume normalization if enabled in voice profile
@@ -2640,6 +2684,7 @@ def regenerate_project_sample(model, project_name: str, voice_library_path: str,
             wav = generate_with_retry(
                 model,
                 text_to_regenerate,
+                'en', # assume english for sample
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
@@ -2990,6 +3035,7 @@ def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_libr
             wav = generate_with_retry(
                 model,
                 text_to_regenerate,
+                'en', # default to English for regeneration for now
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
@@ -3022,6 +3068,7 @@ def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_libr
             wav = generate_with_retry(
                 model,
                 text_to_regenerate,
+                'en', # default to English for regeneration
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),

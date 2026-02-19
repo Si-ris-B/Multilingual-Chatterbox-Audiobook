@@ -142,3 +142,16 @@ Thumbs.db
 /.idea/modules.xml
 /.idea/vcs.xml
 /voice_library/
+/chatterbox_env/bin/activate
+/chatterbox_env/bin/activate.csh
+/chatterbox_env/bin/activate.fish
+/chatterbox_env/bin/Activate.ps1
+/chatterbox_env/bin/pip
+/chatterbox_env/bin/pip3
+/chatterbox_env/bin/pip3.10
+/chatterbox_env/bin/python
+/chatterbox_env/bin/python3
+/chatterbox_env/bin/python3.10
+/chatterbox_env/lib64/
+/chatterbox_env/pyvenv.cfg
+/chatterbox_env/lib64/
