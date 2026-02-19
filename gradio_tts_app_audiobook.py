@@ -265,17 +265,47 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
 
                 for attempt in range(max_segment_retries + 1):
                     try:
-                        wav = model.generate(
-                            text_segment,
-                            language_id=language_id,  # Pass language_id
-                            audio_prompt_path=audio_prompt_path,  # Pass audio path directly
-                            exaggeration=exaggeration,
-                            temperature=temperature,
-                            cfg_weight=cfgw,
-                            min_p=min_p,
-                            top_p=top_p,
-                            repetition_penalty=repetition_penalty,
-                        )
+                        model_class_name = type(model).__name__
+
+                        print("Ytpe : ", model_class_name )
+                        _is_multilingual = model_class_name == 'ChatterboxMultilingualTTS'
+                        _is_turbo = model_class_name == 'ChatterboxTurboTTS'
+
+                        if _is_turbo:
+                            wav = model.generate(
+                                text_segment,
+                                audio_prompt_path=audio_prompt_path,
+                                temperature=temperature,
+                                min_p=min_p,
+                                top_p=top_p,
+                                repetition_penalty=repetition_penalty,
+                                top_k=1000,
+                                norm_loudness=True,
+                            )
+                        elif _is_multilingual:
+                            wav = model.generate(
+                                text_segment,
+                                language_id=language_id if language_id else 'en',
+                                audio_prompt_path=audio_prompt_path,
+                                exaggeration=exaggeration,
+                                temperature=temperature,
+                                cfg_weight=cfgw,
+                                min_p=min_p,
+                                top_p=top_p,
+                                repetition_penalty=repetition_penalty,
+                            )
+                        else:
+                            # Standard ChatterboxTTS
+                            wav = model.generate(
+                                text_segment,
+                                audio_prompt_path=audio_prompt_path,
+                                exaggeration=exaggeration,
+                                temperature=temperature,
+                                cfg_weight=cfgw,
+                                min_p=min_p,
+                                top_p=top_p,
+                                repetition_penalty=repetition_penalty,
+                            )
                         audio_np = wav.squeeze(0).numpy()
                         audio_segments.append(audio_np)
                         segment_success = True
@@ -719,17 +749,16 @@ def validate_text_for_generation(text, voice_name=""):
     
     return True, cleaned_text, "Valid"
 
-def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2):
+def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2, model_type="English-Only (Legacy)"):
     """Generate audio with retry logic for CUDA errors, text validation, and NaN/Librosa errors"""
     # import signal
     import numpy as np
     
-    # Check if model is None and load it if needed
+    # Check if model is None — we cannot safely recover here because
+    # we don't know which model type the user selected.
     if model is None:
-        print("⚠️ Model is None, loading model...")
-        model = load_model()
-        if model is None:
-            raise RuntimeError("❌ Failed to load TTS model")
+        raise RuntimeError(
+            "❌ Model is None in generate_with_retry. Ensure a model is loaded via the model selector before generating.")
     
     # Validate text before generation
     is_valid, cleaned_text, reason = validate_text_for_generation(text)
@@ -752,8 +781,12 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
     # Set timeout for generation (30 seconds per chunk)
     timeout_seconds = 30
 
+    model_class_name = type(model).__name__
+
+    print("Ytpe : ", model_class_name)
     # Check if this is the Turbo model
-    is_turbo = hasattr(model, 'generate') and model.__class__.__name__ == 'ChatterboxTurboTTS'
+    is_turbo = "Turbo" in model_type
+    is_multilingual = "Multilingual" in model_type
 
     for retry in range(max_retries):
         try:
@@ -788,23 +821,30 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                     )
                 else:
                     # Standard / Multilingual generation
-                    # Handle language_id argument compatibility
-                    kwargs = {
-                        "text": text,
-                        "audio_prompt_path": audio_prompt_path,
-                        "exaggeration": exaggeration,
-                        "temperature": temperature,
-                        "cfg_weight": cfg_weight,
-                        "min_p": min_p,
-                        "top_p": top_p,
-                        "repetition_penalty": repetition_penalty
-                    }
-
-                    # Only pass language_id if the model accepts it (Multilingual)
-                    if "language_id" in model.generate.__code__.co_varnames:
-                        kwargs["language_id"] = language_id if language_id else 'en'
-
-                    wav = model.generate(**kwargs)
+                    if is_multilingual:
+                        wav = model.generate(
+                            text,
+                            language_id=language_id if language_id else 'en',
+                            audio_prompt_path=audio_prompt_path,
+                            exaggeration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfg_weight,
+                            min_p=min_p,
+                            top_p=top_p,
+                            repetition_penalty=repetition_penalty
+                        )
+                    else:
+                        # Standard ChatterboxTTS — no language_id
+                        wav = model.generate(
+                            text,
+                            audio_prompt_path=audio_prompt_path,
+                            exaggeration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfg_weight,
+                            min_p=min_p,
+                            top_p=top_p,
+                            repetition_penalty=repetition_penalty
+                        )
 
                 return wav
             
@@ -849,6 +889,7 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
 def create_audiobook(
     model,
     text_content: str,
+    model_type: str,
     voice_library_path: str,
     selected_voice: str,
     project_name: str,
@@ -960,7 +1001,8 @@ def create_audiobook(
                 max_retries=3,
                 min_p=voice_config['min_p'],
                 top_p=voice_config['top_p'],
-                repetition_penalty=voice_config['repetition_penalty']
+                repetition_penalty=voice_config['repetition_penalty'],
+                model_type=model_type,
             )
             audio_np = wav.squeeze(0).cpu().numpy()
             
@@ -1768,6 +1810,7 @@ def create_multi_voice_audiobook_with_assignments(
     model,
     text_content: str,
     language_id: str,  # <-- ADD THIS
+    model_type: str,
     voice_library_path: str,
     project_name: str,
     voice_assignments: dict,
@@ -1921,13 +1964,14 @@ def create_multi_voice_audiobook_with_assignments(
                 wav = generate_with_retry(
                     processing_model,
                     chunk_text,
-                    language_id if language_id else 'en',  # Pass the language
-                    voice_config['audio_file'],  # Pass audio path directly
+                    language_id if language_id else 'en',
+                    voice_config['audio_file'],
                     voice_config['exaggeration'],
                     voice_config['temperature'],
                     voice_config['cfg_weight'],
-                    max_retries=3
-                    )
+                    max_retries=3,
+                    model_type=model_type
+                )
                 audio_np = wav.squeeze(0).cpu().numpy()
             
             # Apply volume normalization if enabled in voice profile
@@ -1962,7 +2006,10 @@ def create_multi_voice_audiobook_with_assignments(
                 wav_file.setframerate(processing_model.sr)
                 audio_int16 = (audio_np * 32767).astype(np.int16)
                 wav_file.writeframes(audio_int16.tobytes())
-            del wav
+            try:
+                del wav
+            except NameError:
+                pass
             if get_model_device_str(processing_model) == 'cuda':
                 torch.cuda.empty_cache()
         except Exception as chunk_error_outer:
@@ -2662,7 +2709,7 @@ def cleanup_temp_continuous_files(project_name: str) -> None:
     except Exception as e:
         print(f"⚠️ Error cleaning temp files: {str(e)}")
 
-def regenerate_project_sample(model, project_name: str, voice_library_path: str, sample_text: str = None) -> tuple:
+def regenerate_project_sample(model, project_name: str, voice_library_path: str, model_type: str, sample_text: str = None, ) -> tuple:
     """Regenerate a sample from an existing project"""
     if not project_name:
         return None, "❌ No project selected"
@@ -2715,7 +2762,8 @@ def regenerate_project_sample(model, project_name: str, voice_library_path: str,
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
-                voice_config.get('cfg_weight', 0.5)
+                voice_config.get('cfg_weight', 0.5),
+                model_type=model_type
             )
             
             audio_output = wav.squeeze(0).cpu().numpy()
@@ -2772,7 +2820,8 @@ def regenerate_project_sample(model, project_name: str, voice_library_path: str,
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
-                voice_config.get('cfg_weight', 0.5)
+                voice_config.get('cfg_weight', 0.5),
+                model_type=model_type
             )
             
             audio_output = wav.squeeze(0).cpu().numpy()
@@ -3069,7 +3118,7 @@ def get_project_chunks(project_name: str) -> list:
     print(f"📊 Returning {len(chunks)} chunks for project '{project_name}'")
     return chunks
 
-def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_library_path: str, custom_text: str = None) -> tuple:
+def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_library_path: str, model_type: str, custom_text: str = None) -> tuple:
     """Regenerate a single chunk from a project"""
     # Check if model is None and load it if needed
     if model is None:
@@ -3123,7 +3172,8 @@ def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_libr
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
-                voice_config.get('cfg_weight', 0.5)
+                voice_config.get('cfg_weight', 0.5),
+                model_type=model_type
             )
             
             voice_display = voice_config.get('display_name', 'Unknown')
@@ -3156,7 +3206,8 @@ def regenerate_single_chunk(model, project_name: str, chunk_num: int, voice_libr
                 voice_config['audio_file'],
                 voice_config.get('exaggeration', 0.5),
                 voice_config.get('temperature', 0.8),
-                voice_config.get('cfg_weight', 0.5)
+                voice_config.get('cfg_weight', 0.5),
+                model_type=model_type
             )
             
             voice_display = f"{voice_config.get('display_name', assigned_voice)} (Character: {character_name})"
@@ -4450,6 +4501,7 @@ def create_audiobook_with_original_voice_metadata(
     model,
     text_content: str,
     language_id: str,  # <-- ADD THIS
+    model_type: str,
     voice_library_path: str,
     selected_voice: str,
     project_name: str,
@@ -4542,7 +4594,8 @@ def create_audiobook_with_original_voice_metadata(
                 voice_config['audio_file_path'], 
                 voice_config['exaggeration'], 
                 voice_config['temperature'], 
-                voice_config['cfg_weight']
+                voice_config['cfg_weight'],
+                model_type=model_type
             )
             
             if audio_data is None:
@@ -4656,7 +4709,7 @@ def create_audiobook_with_original_voice_metadata(
     success_msg = f"✅ Audiobook created successfully!\n🎭 Voice: {original_voice_config['display_name']}\n📊 {total_words:,} words in {total_chunks} chunks\n⏱️ Duration: ~{duration_minutes} minutes{pause_info}\n📁 Saved to: {project_dir}\n🎵 Files: {len(audio_chunks)} audio chunks\n💾 Metadata saved for regeneration"
     return (getattr(model, "sr", 24000) if model else 24000, combined_audio), success_msg
 
-def create_audiobook_with_volume_settings(model, text_content, language_id, voice_library_path, selected_voice, project_name,
+def create_audiobook_with_volume_settings(model, text_content, language_id, model_type, voice_library_path, selected_voice, project_name,
                                          enable_norm=True, target_level=-18.0):
     """Wrapper for create_audiobook that applies volume normalization settings"""
     # Get the voice config and temporarily apply volume settings
@@ -4681,7 +4734,8 @@ def create_audiobook_with_volume_settings(model, text_content, language_id, voic
         
         # Use the temporary voice for audiobook creation, but preserve original voice name in metadata
         result = create_audiobook_with_original_voice_metadata(
-            model,  text_content, language_id, voice_library_path, temp_voice_name, project_name, selected_voice
+            model, text_content, language_id, model_type, voice_library_path, temp_voice_name, project_name,
+            selected_voice
         )
         
         # Clean up temporary voice
@@ -4710,7 +4764,7 @@ def create_multi_voice_audiobook_with_original_voice_metadata(
     
     # Use the existing multi-voice function with temp assignments for generation
     result = create_multi_voice_audiobook_with_assignments(
-        model, text_content, voice_library_path, project_name, temp_voice_assignments, resume, autosave_interval
+        model, text_content, voice_library_path, project_name, temp_voice_assignments, resume, autosave_interval, model_type=model_type
     )
     
     # After creation, update the metadata to use original voice names
@@ -4793,7 +4847,7 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
         
         # Use temporary voices for audiobook creation but preserve original voice names in metadata
         result = create_multi_voice_audiobook_with_original_voice_metadata(
-            model, text_content, voice_library_path, project_name, temp_assignments, voice_assignments
+            model, text_content, voice_library_path, project_name, temp_assignments, voice_assignments, model_type=model_type
         )
         
         # Clean up temporary voices
@@ -4807,7 +4861,7 @@ def create_multi_voice_audiobook_with_volume_settings(model, text_content, voice
         return result
     else:
         return create_multi_voice_audiobook_with_assignments(
-            model, text_content, voice_library_path, project_name, voice_assignments
+            model, text_content, voice_library_path, project_name, voice_assignments, model_type=model_type
         )
 
 # =============================================================================
@@ -5026,6 +5080,11 @@ def create_batch_audiobook(
 
 with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     model_state = gr.State(None)
+
+    # ADD THESE TWO LINES TO STORE THE SELECTED MODEL TYPE STRING
+    single_model_type_state = gr.State("English-Only (Legacy)")
+    multi_model_type_state = gr.State("English-Only (Legacy)")
+
     voice_library_path_state = gr.State(SAVED_VOICE_LIBRARY_PATH)
     
     gr.HTML("""
@@ -6545,23 +6604,24 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     
     # Enhanced Audiobook Creation with chunking and saving
     process_btn.click(
-        fn=create_audiobook_with_volume_settings,
-        inputs=[
-            model_state,
-            audiobook_text,
-            single_language_id,  # <-- ADD THIS
-            voice_library_path_state,
-            audiobook_voice_selector,
-            project_name,
-            enable_volume_norm,
-            target_volume_level
-        ],
-        outputs=[audiobook_output, audiobook_status]
-    ).then(
-        fn=force_refresh_all_project_dropdowns,
-        inputs=[],
-        outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
-    )
+    fn=create_audiobook_with_volume_settings,
+    inputs=[
+        model_state,
+        audiobook_text,
+        single_language_id,
+        single_model_type_state,  # <--- CHANGED: Use the state variable now
+        voice_library_path_state,
+        audiobook_voice_selector,
+        project_name,
+        enable_volume_norm,
+        target_volume_level
+    ],
+    outputs=[audiobook_output, audiobook_status]
+).then(
+    fn=force_refresh_all_project_dropdowns,
+    inputs=[],
+    outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
+)
 
     # Get references to the sliders you defined earlier in the layout
     # Assuming variable names: exaggeration_slider, cfg_slider
@@ -6570,13 +6630,17 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     single_model_type.change(
         fn=update_ui_controls,
         inputs=single_model_type,
-        # We only need to update the Language Dropdown and the Tags Group
         outputs=[single_language_id, single_tags_group]
     ).then(
         fn=switch_model,
         inputs=[single_model_type, model_state],
         outputs=model_state,
         show_progress="full"
+    ).then(
+        # FIX: Save the selected string ("Chatterbox-Turbo ⚡", etc.) to state
+        fn=lambda x: x,
+        inputs=single_model_type,
+        outputs=single_model_type_state
     )
     
     # Text analysis to find characters and populate dropdowns
@@ -6616,18 +6680,21 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     # Multi-voice audiobook creation (using voice assignments)
     # MODIFIED: Add multi_language_id to the inputs list
     process_multi_btn.click(
-        fn=create_multi_voice_audiobook_with_assignments,
-        inputs=[
-            model_state,
-            multi_audiobook_text,
-            multi_language_id,  # <-- ADD THIS
-            voice_library_path_state,
-            multi_project_name,
-            voice_assignments_state,
-            resume_project_btn,
-            # Add other args like volume norm if they are in your function call
-        ],
-        outputs=[multi_audiobook_output, multi_audiobook_status, gr.State(), gr.State()]  # Add dummy outputs if needed
+    fn=create_multi_voice_audiobook_with_assignments,
+    inputs=[
+        model_state,
+        multi_audiobook_text,
+        multi_language_id,
+        multi_model_type_state, # <--- CHANGED: Use the state variable (was 'model_type' which was undefined)
+        voice_library_path_state,
+        multi_project_name,
+        voice_assignments_state,
+        resume_project_btn,
+        # Note: If your function expects more args like autosave, ensure they match the definition
+        # Based on your function def: model, text, language_id, model_type, voice_lib, proj_name, assignments, resume, autosave
+        gr.State(10) # Placeholder for autosave_interval if not passed via UI
+    ],
+    outputs=[multi_audiobook_output, multi_audiobook_status, gr.State(), gr.State()]
     ).then(
         fn=force_refresh_all_project_dropdowns,
         inputs=[],
@@ -6638,13 +6705,17 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
     multi_model_type.change(
         fn=update_ui_controls,
         inputs=multi_model_type,
-        # We only need to update the Language Dropdown and the Tags Group
         outputs=[multi_language_id, multi_tags_group]
     ).then(
         fn=switch_model,
         inputs=[multi_model_type, model_state],
         outputs=model_state,
         show_progress="full"
+    ).then(
+        # FIX: Save the selected string to state
+        fn=lambda x: x,
+        inputs=multi_model_type,
+        outputs=multi_model_type_state
     )
     
     # Refresh voices for multi-voice (updates dropdown choices)

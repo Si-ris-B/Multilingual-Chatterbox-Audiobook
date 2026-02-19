@@ -243,32 +243,28 @@ class VoiceEncoder(nn.Module):
 
         return self.utt_to_spk_embed(utt_embeds) if as_spk else utt_embeds
 
+    # Around line 260-275 in embeds_from_wavs method
     def embeds_from_wavs(
-        self,
-        wavs: List[np.ndarray],
-        sample_rate,
-        as_spk=False,
-        batch_size=32,
-        trim_top_db: Optional[float]=20,
-        **kwargs
+            self,
+            wavs: List[np.ndarray],
+            sample_rate,
+            as_spk=False,
+            batch_size=32,
+            trim_top_db: Optional[float] = 20,
+            **kwargs
     ):
-        """
-        Wrapper around embeds_from_mels
-
-        :param trim_top_db: this argument was only added for the sake of compatibility with metavoice's implementation
-        """
         if sample_rate != self.hp.sample_rate:
             wavs = [
                 librosa.resample(wav, orig_sr=sample_rate, target_sr=self.hp.sample_rate, res_type="kaiser_fast")
                 for wav in wavs
             ]
-
         if trim_top_db:
             wavs = [librosa.effects.trim(wav, top_db=trim_top_db)[0] for wav in wavs]
 
+        # ADD THIS: Ensure float32 dtype
+        wavs = [wav.astype(np.float32) for wav in wavs]
+
         if "rate" not in kwargs:
             kwargs["rate"] = 1.3  # Resemble's default value.
-
         mels = [melspectrogram(w, self.hp).T for w in wavs]
-
         return self.embeds_from_mels(mels, as_spk=as_spk, batch_size=batch_size, **kwargs)
