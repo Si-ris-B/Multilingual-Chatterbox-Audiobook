@@ -73,10 +73,19 @@ except ImportError:
 try:
     from src.chatterbox.tts import ChatterboxTTS
     from src.chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
+
+    # Attempt to import Turbo, handle if file is missing (though you should have added it)
+    try:
+        from src.chatterbox.tts_turbo import ChatterboxTurboTTS
+    except ImportError:
+        print("Warning: ChatterboxTurboTTS not found. Turbo features will be disabled.")
+        ChatterboxTurboTTS = None
+
     CHATTERBOX_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: ChatterboxTTS not available - {e}")
     CHATTERBOX_AVAILABLE = False
+    SUPPORTED_LANGUAGES = {}  # Fallback to prevent NameError if import fails completely
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Force CPU mode for multi-voice to avoid CUDA indexing errors
@@ -119,9 +128,25 @@ def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
 
-def load_model():
-    model = ChatterboxTTS.from_pretrained(DEVICE)
-    return model
+
+def load_model(model_type="English-Only (Legacy)"):
+    """Load model based on type string"""
+    if "Turbo" in model_type:
+        print("⚡ Loading Chatterbox-Turbo...")
+        try:
+            # We import here or use the global if imported at top
+            if 'ChatterboxTurboTTS' not in globals():
+                from src.chatterbox.tts_turbo import ChatterboxTurboTTS
+            return ChatterboxTurboTTS.from_pretrained(DEVICE)
+        except Exception as e:
+            print(f"❌ Error loading Turbo: {e}, falling back to Standard")
+
+    if "Multilingual" in model_type:
+        print("🌍 Loading Multilingual...")
+        return ChatterboxMultilingualTTS.from_pretrained(DEVICE)
+
+    print("🎤 Loading Standard English...")
+    return ChatterboxTTS.from_pretrained(DEVICE)
 
 
 # NEW: Function to switch between TTS models and update the model state in Gradio
@@ -162,10 +187,8 @@ def switch_model(model_type, current_model_state, progress=gr.Progress()):
     # Unload the old model to free VRAM/RAM
     if current_model_state is not None:
         progress(0, desc=f"Unloading {type(current_model_state).__name__}...")
-        print(f"Unloading {type(current_model_state).__name__}...")
         del current_model_state
 
-    # Call garbage collector and clear CUDA cache
     import gc
     gc.collect()
     if torch.cuda.is_available():
@@ -179,7 +202,11 @@ def switch_model(model_type, current_model_state, progress=gr.Progress()):
     if "Multilingual" in model_type:
         new_model = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
         print("✅ ChatterboxMultilingualTTS loaded.")
-    else:  # Default to the English-only model
+    # NEW: Handle Turbo
+    elif "Turbo" in model_type:
+        new_model = ChatterboxTurboTTS.from_pretrained(DEVICE)
+        print("⚡ ChatterboxTurboTTS loaded.")
+    else:  # Default to English-Only
         new_model = ChatterboxTTS.from_pretrained(DEVICE)
         print("✅ ChatterboxTTS (English-Only) loaded.")
 
@@ -724,7 +751,10 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
     
     # Set timeout for generation (30 seconds per chunk)
     timeout_seconds = 30
-    
+
+    # Check if this is the Turbo model
+    is_turbo = hasattr(model, 'generate') and model.__class__.__name__ == 'ChatterboxTurboTTS'
+
     for retry in range(max_retries):
         try:
             # Clear memory before generation
@@ -741,27 +771,41 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
             # if hasattr(signal, 'SIGALRM'):
             #     signal.signal(signal.SIGALRM, timeout_handler)
             #     signal.alarm(timeout_seconds)
-            
+
             try:
-                # Prepare conditionals from audio prompt
-                # conds = model.prepare_conditionals(audio_prompt_path, exaggeration)
-                
-                wav = model.generate(
-                    text,
-                    audio_prompt_path=audio_prompt_path,
-                    language_id=language_id if language_id else 'en',
-                    exaggeration=exaggeration,
-                    temperature=temperature,
-                    cfg_weight=cfg_weight,
-                    min_p=min_p,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                )
-                
-                # Cancel timeout if successful
-                # if hasattr(signal, 'SIGALRM'):
-                #     signal.alarm(0)
-                
+                if is_turbo:
+                    # Turbo specific generation
+                    # Turbo ignores exaggeration and CFG. It uses top_k (defaulting to 1000 here)
+                    wav = model.generate(
+                        text,
+                        audio_prompt_path=audio_prompt_path,
+                        temperature=temperature,
+                        min_p=min_p,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        top_k=1000,  # Default for Turbo
+                        norm_loudness=True  # Turbo specific
+                    )
+                else:
+                    # Standard / Multilingual generation
+                    # Handle language_id argument compatibility
+                    kwargs = {
+                        "text": text,
+                        "audio_prompt_path": audio_prompt_path,
+                        "exaggeration": exaggeration,
+                        "temperature": temperature,
+                        "cfg_weight": cfg_weight,
+                        "min_p": min_p,
+                        "top_p": top_p,
+                        "repetition_penalty": repetition_penalty
+                    }
+
+                    # Only pass language_id if the model accepts it (Multilingual)
+                    if "language_id" in model.generate.__code__.co_varnames:
+                        kwargs["language_id"] = language_id if language_id else 'en'
+
+                    wav = model.generate(**kwargs)
+
                 return wav
             
             except TimeoutError:
@@ -2201,6 +2245,46 @@ css = """
 }
 """
 
+# NEW: Paralinguistic Tags for Turbo
+EVENT_TAGS = [
+    "[clear throat]", "[sigh]", "[shush]", "[cough]", "[groan]",
+    "[sniff]", "[gasp]", "[chuckle]", "[laugh]"
+]
+
+# NEW: JS to insert tags into the active textbox
+INSERT_TAG_JS = """
+(tag_val, current_text) => {
+    // This finds the currently focused textbox or defaults to the main one
+    // Note: In Gradio complex layouts, targeting the specific active element is tricky.
+    // This simple version appends to the end or inserts at cursor if supported by browser/gradio.
+    return current_text + " " + tag_val; 
+}
+"""
+
+# NEW: CSS for Tag Buttons
+tag_css = """
+.tag-container {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 5px !important;
+    margin-bottom: 10px !important;
+}
+.tag-btn {
+    min-width: fit-content !important;
+    font-size: 12px !important;
+    padding: 2px 8px !important;
+    background: #eef2ff !important;
+    color: #3730a3 !important;
+    border: 1px solid #c7d2fe !important;
+    border-radius: 12px !important;
+}
+.tag-btn:hover {
+    background: #c7d2fe !important;
+    border-color: #3730a3 !important;
+}
+"""
+# Update your existing 'css' variable to include 'tag_css'
+css = css + tag_css
 # Load the saved voice library path
 SAVED_VOICE_LIBRARY_PATH = load_config()
 
@@ -4376,6 +4460,8 @@ def create_audiobook_with_original_voice_metadata(
     """Create audiobook but save original voice name in metadata (for volume normalization)"""
     # This is a modified version of create_audiobook that preserves the original voice name in metadata
     # while using a temporary voice for generation
+
+
     
     if not text_content or not text_content.strip():
         return None, "❌ No text content provided"
@@ -4595,7 +4681,7 @@ def create_audiobook_with_volume_settings(model, text_content, language_id, voic
         
         # Use the temporary voice for audiobook creation, but preserve original voice name in metadata
         result = create_audiobook_with_original_voice_metadata(
-            model, text_content, language_id, voice_library_path, temp_voice_name, project_name, selected_voice
+            model,  text_content, language_id, voice_library_path, temp_voice_name, project_name, selected_voice
         )
         
         # Clean up temporary voice
@@ -4798,6 +4884,18 @@ def validate_batch_audiobook_input(file_list: list, selected_voice: str, project
     status_msg = f"✅ Ready to process {total_files} files ({total_words} total words) with voice '{selected_voice}' as project '{project_name}'"
     
     return gr.Button(interactive=True), status_msg, None
+
+
+def update_ui_controls(model_type):
+    """Updates visibility of controls based on model type."""
+    is_multilingual = "Multilingual" in model_type
+    is_turbo = "Turbo" in model_type
+
+    # Returns 2 items: [Language Dropdown, Tags Group]
+    return (
+        gr.Dropdown(visible=is_multilingual, value="en" if is_multilingual else None),
+        gr.Group(visible=is_turbo)
+    )
 
 def create_batch_audiobook(
     model,
@@ -5174,7 +5272,8 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             
             with gr.Row():
                 with gr.Column(scale=2):
-                    # Text Input Section
+
+
                     with gr.Group():
                         gr.HTML("<h3>📝 Text Content</h3>")
                         
@@ -5237,6 +5336,20 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                 
                                 # State for batch processing
                                 batch_file_list = gr.State([])
+
+                                # Text Input Section
+                    with gr.Group(visible=False) as single_tags_group:
+                        gr.Markdown("**Paralinguistic Tags:** (Click to insert)")
+                        with gr.Row(elem_classes=["tag-container"]):
+                            for tag in EVENT_TAGS:
+                                btn = gr.Button(tag, elem_classes=["tag-btn"], size="sm")
+                                # Logic to append tag to text
+                                btn.click(
+                                    fn=lambda t, current: current + " " + t,
+                                    inputs=[gr.State(tag), audiobook_text],
+                                    # Note: audiobook_text must be defined below, Gradio handles this lazy ref usually, but if error, move logic to bottom
+                                    outputs=[audiobook_text]
+                                )
                     # NEW: Project Management Section
                     with gr.Group():
                         gr.HTML("<h3>📁 Project Management</h3>")
@@ -5256,20 +5369,18 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                     with gr.Group():
                         gr.HTML("<h3>🎭 Voice Configuration</h3>")
 
-                        # NEW: Add Model Type Selector
+                        # MODIFIED: Add Turbo to choices
                         single_model_type = gr.Radio(
-                            choices=["English-Only (Legacy)", "Multilingual (New)"],
+                            choices=["English-Only (Legacy)", "Multilingual (New)", "Chatterbox-Turbo ⚡"],
                             value="English-Only (Legacy)",
                             label="Model Type",
-                            info="Choose the TTS model to use."
+                            info="Turbo is faster and supports emotion tags [laugh], etc. but doesn't support Exaggeration/CFG."
                         )
 
-                        # NEW: Add Language Dropdown (initially hidden)
                         single_language_id = gr.Dropdown(
                             choices=list(SUPPORTED_LANGUAGES.keys()),
                             value="en",
                             label="Language",
-                            info="Select the language of the audiobook text",
                             visible=False
                         )
                         
@@ -5450,7 +5561,8 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
             
             with gr.Row():
                 with gr.Column(scale=2):
-                    # Text Input Section with Voice Tags
+
+
                     with gr.Group():
                         gr.HTML("<h3>📝 Multi-Voice Text Content</h3>")
                         
@@ -5481,6 +5593,18 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
                                 # File status
                                 multi_file_status = gr.HTML(
                                     "<div class='file-status'>📄 No file loaded</div>"
+                                )
+
+                                # Text Input Section with Voice Tags
+                    with gr.Group(visible=False) as multi_tags_group:
+                        gr.Markdown("**Paralinguistic Tags:** (Insert into character dialogue)")
+                        with gr.Row(elem_classes=["tag-container"]):
+                            for tag in EVENT_TAGS:
+                                btn = gr.Button(tag, elem_classes=["tag-btn"], size="sm")
+                                btn.click(
+                                    fn=lambda t, current: current + " " + t,
+                                    inputs=[gr.State(tag), multi_audiobook_text],
+                                    outputs=[multi_audiobook_text]
                                 )
                     # NEW: Project Management Section
                     with gr.Group():
@@ -6439,14 +6563,18 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
         outputs=[previous_project_dropdown, multi_previous_project_dropdown, project_dropdown]
     )
 
-    # NEW: Event handler for the single-voice model selector
+    # Get references to the sliders you defined earlier in the layout
+    # Assuming variable names: exaggeration_slider, cfg_slider
+
+    # 1. Single Voice Model Change
     single_model_type.change(
-        fn=update_ui_for_model,
+        fn=update_ui_controls,
         inputs=single_model_type,
-        outputs=single_language_id
+        # We only need to update the Language Dropdown and the Tags Group
+        outputs=[single_language_id, single_tags_group]
     ).then(
         fn=switch_model,
-        inputs=[single_model_type, model_state],  # Pass model_state for cleanup
+        inputs=[single_model_type, model_state],
         outputs=model_state,
         show_progress="full"
     )
@@ -6508,14 +6636,15 @@ with gr.Blocks(css=css, title="Chatterbox TTS - Audiobook Edition") as demo:
 
     # NEW: Event handler for the multi-voice model selector
     multi_model_type.change(
-        fn=update_ui_for_model,
+        fn=update_ui_controls,
         inputs=multi_model_type,
-        outputs=multi_language_id
+        # We only need to update the Language Dropdown and the Tags Group
+        outputs=[multi_language_id, multi_tags_group]
     ).then(
-    fn=switch_model,
-    inputs=[multi_model_type, model_state], # <-- Add model_state here
-    outputs=model_state,
-    show_progress="full"
+        fn=switch_model,
+        inputs=[multi_model_type, model_state],
+        outputs=model_state,
+        show_progress="full"
     )
     
     # Refresh voices for multi-voice (updates dropdown choices)
