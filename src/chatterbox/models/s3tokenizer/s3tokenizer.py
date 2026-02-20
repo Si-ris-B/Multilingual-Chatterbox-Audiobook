@@ -126,13 +126,26 @@ class S3Tokenizer(S3TokenizerV2):
         )
 
     def log_mel_spectrogram(
-            self,
-            audio: torch.Tensor,
-            padding: int = 0,
+        self,
+        audio: torch.Tensor,
+        padding: int = 0,
     ):
         """
         Compute the log-Mel spectrogram of
-        ...
+
+        Parameters
+        ----------
+        audio: torch.Tensor, shape = (*)
+            The path to audio or either a NumPy array or Tensor containing the
+            audio waveform in 16 kHz
+
+        padding: int
+            Number of zero samples to pad to the right
+
+        Returns
+        -------
+        torch.Tensor, shape = (128, n_frames)
+            A Tensor that contains the Mel spectrogram
         """
         if not torch.is_tensor(audio):
             audio = torch.from_numpy(audio)
