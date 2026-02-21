@@ -220,6 +220,119 @@ def load_model_cpu():
 
 
 # MODIFIED: Updated generate function for the new API and multilingual support
+# def generate(model, text, language_id, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05,
+#              top_p=1.0, repetition_penalty=1.2):
+#     if model is None:
+#         # Default to the English model if none is loaded
+#         model = ChatterboxTTS.from_pretrained(DEVICE)
+#
+#     if seed_num != 0:
+#         set_seed(int(seed_num))
+#
+#     # The 'language_id' will be None if the English model is selected. We default to 'en'.
+#     # The old ChatterboxTTS model will simply ignore this parameter.
+#     if language_id is None:
+#         language_id = 'en'
+#
+#     from src.audiobook.processing import create_silence_audio
+#     import re
+#
+#     segments = re.split(r'(\n+)', text)
+#     audio_segments = []
+#     sample_rate = getattr(model, "sr", 24000)
+#     total_pauses_added = 0
+#
+#     # NOTE: The critical change is here. We no longer call `prepare_conditionals` separately.
+#
+#     for segment in segments:
+#         if not segment:
+#             continue
+#
+#         if '\n' in segment:
+#             num_breaks = segment.count('\n')
+#             pause_duration = num_breaks * 0.1
+#             if pause_duration > 0:
+#                 pause_audio = create_silence_audio(pause_duration, sample_rate)
+#                 audio_segments.append(pause_audio)
+#                 total_pauses_added += pause_duration
+#         else:
+#             text_segment = segment.strip()
+#             if text_segment:
+#                 # The new `generate` function handles conditioning internally.
+#                 # Added simple retry logic for this segment in case of NaN errors
+#                 max_segment_retries = 2
+#                 segment_success = False
+#
+#                 for attempt in range(max_segment_retries + 1):
+#                     try:
+#                         model_class_name = type(model).__name__
+#
+#                         print("Ytpe : ", model_class_name )
+#                         _is_multilingual = model_class_name == 'ChatterboxMultilingualTTS'
+#                         _is_turbo = model_class_name == 'ChatterboxTurboTTS'
+#
+#                         if _is_turbo:
+#                             wav = model.generate(
+#                                 text_segment,
+#                                 audio_prompt_path=audio_prompt_path,
+#                                 temperature=temperature,
+#                                 min_p=min_p,
+#                                 top_p=top_p,
+#                                 repetition_penalty=repetition_penalty,
+#                                 top_k=1000,
+#                                 norm_loudness=True,
+#                             )
+#                         elif _is_multilingual:
+#                             wav = model.generate(
+#                                 text_segment,
+#                                 language_id=language_id,
+#                                 audio_prompt_path=audio_prompt_path,
+#                                 exaggeration=exaggeration,
+#                                 temperature=temperature,
+#                                 cfg_weight=cfgw,
+#                                 min_p=min_p,
+#                                 top_p=top_p,
+#                                 repetition_penalty=repetition_penalty,
+#                             )
+#                         else:
+#                             # Standard ChatterboxTTS
+#                             wav = model.generate(
+#                                 text_segment,
+#                                 audio_prompt_path=audio_prompt_path,
+#                                 exaggeration=exaggeration,
+#                                 temperature=temperature,
+#                                 cfg_weight=cfgw,
+#                                 min_p=min_p,
+#                                 top_p=top_p,
+#                                 repetition_penalty=repetition_penalty,
+#                             )
+#                         audio_np = wav.squeeze(0).numpy()
+#                         audio_segments.append(audio_np)
+#                         segment_success = True
+#                         break
+#                     except Exception as e:
+#                         err_str = str(e)
+#                         is_nan_error = "Audio buffer is not finite" in err_str or "input must be finite" in err_str
+#                         if is_nan_error and attempt < max_segment_retries:
+#                             print(f"⚠️ NaN error in TTS generation, retrying segment ({attempt+1}/{max_segment_retries})...")
+#                             # Perturb seed slightly for retry
+#                             if seed_num != 0:
+#                                 set_seed(int(seed_num) + attempt + 1)
+#                             else:
+#                                 set_seed(random.randint(1, 10000))
+#                             continue
+#                         else:
+#                             print(f"❌ Error generating segment: {err_str}")
+#                             # Skip this segment or insert silence? Let's skip to avoid breaking the whole stream
+#                             break
+#
+#     if audio_segments:
+#         final_audio = np.concatenate(audio_segments)
+#         return (sample_rate, final_audio)
+#     else:
+#         # Fallback for empty text or only newlines
+#         return (sample_rate, np.array([], dtype=np.float32))
+
 def generate(model, text, language_id, audio_prompt_path, exaggeration, temperature, seed_num, cfgw, min_p=0.05,
              top_p=1.0, repetition_penalty=1.2):
     if model is None:
@@ -229,8 +342,6 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
     if seed_num != 0:
         set_seed(int(seed_num))
 
-    # The 'language_id' will be None if the English model is selected. We default to 'en'.
-    # The old ChatterboxTTS model will simply ignore this parameter.
     if language_id is None:
         language_id = 'en'
 
@@ -241,8 +352,6 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
     audio_segments = []
     sample_rate = getattr(model, "sr", 24000)
     total_pauses_added = 0
-
-    # NOTE: The critical change is here. We no longer call `prepare_conditionals` separately.
 
     for segment in segments:
         if not segment:
@@ -258,18 +367,21 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
         else:
             text_segment = segment.strip()
             if text_segment:
-                # The new `generate` function handles conditioning internally.
-                # Added simple retry logic for this segment in case of NaN errors
                 max_segment_retries = 2
                 segment_success = False
 
                 for attempt in range(max_segment_retries + 1):
                     try:
                         model_class_name = type(model).__name__
-
-                        print("Ytpe : ", model_class_name )
                         _is_multilingual = model_class_name == 'ChatterboxMultilingualTTS'
                         _is_turbo = model_class_name == 'ChatterboxTurboTTS'
+
+                        # --- FIX FOR MULTILINGUAL ONLY ---
+                        # Reset the internal compilation state to clear the alignment analyzer's history.
+                        # This prevents the "memory leak" where it thinks sentence 2 is already finished.
+                        if _is_multilingual and hasattr(model, "t3"):
+                            model.t3.compiled = False
+                        # ---------------------------------
 
                         if _is_turbo:
                             wav = model.generate(
@@ -315,7 +427,6 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
                         is_nan_error = "Audio buffer is not finite" in err_str or "input must be finite" in err_str
                         if is_nan_error and attempt < max_segment_retries:
                             print(f"⚠️ NaN error in TTS generation, retrying segment ({attempt+1}/{max_segment_retries})...")
-                            # Perturb seed slightly for retry
                             if seed_num != 0:
                                 set_seed(int(seed_num) + attempt + 1)
                             else:
@@ -323,14 +434,12 @@ def generate(model, text, language_id, audio_prompt_path, exaggeration, temperat
                             continue
                         else:
                             print(f"❌ Error generating segment: {err_str}")
-                            # Skip this segment or insert silence? Let's skip to avoid breaking the whole stream
                             break
 
     if audio_segments:
         final_audio = np.concatenate(audio_segments)
         return (sample_rate, final_audio)
     else:
-        # Fallback for empty text or only newlines
         return (sample_rate, np.array([], dtype=np.float32))
 
 def generate_with_cpu_fallback(model, text, audio_prompt_path, exaggeration, temperature, cfg_weight, min_p=0.05, top_p=1.0, repetition_penalty=1.2):
@@ -749,66 +858,183 @@ def validate_text_for_generation(text, voice_name=""):
     
     return True, cleaned_text, "Valid"
 
-def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2, model_type="English-Only (Legacy)"):
+# def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight, max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2, model_type="English-Only (Legacy)"):
+#     """Generate audio with retry logic for CUDA errors, text validation, and NaN/Librosa errors"""
+#     # import signal
+#     import numpy as np
+#
+#     # Check if model is None — we cannot safely recover here because
+#     # we don't know which model type the user selected.
+#     if model is None:
+#         raise RuntimeError(
+#             "❌ Model is None in generate_with_retry. Ensure a model is loaded via the model selector before generating.")
+#
+#     # Validate text before generation
+#     is_valid, cleaned_text, reason = validate_text_for_generation(text)
+#     if not is_valid:
+#         print(f"⚠️ Skipping TTS generation - {reason}")
+#         # Return a very short silence instead of generating static
+#         silence_duration = 0.1  # 100ms of silence
+#         sample_rate = getattr(model, 'sr', 24000) if model else 24000
+#         silence_samples = int(silence_duration * sample_rate)
+#         silence_audio = np.zeros(silence_samples, dtype=np.float32)
+#         return torch.tensor(silence_audio).unsqueeze(0)
+#
+#     # Use cleaned text for generation
+#     text = cleaned_text
+#
+#     # Timeout handler for hanging generation
+#     # def timeout_handler(signum, frame):
+#     #     raise TimeoutError("TTS generation timed out")
+#
+#     # Set timeout for generation (30 seconds per chunk)
+#     timeout_seconds = 30
+#
+#     model_class_name = type(model).__name__
+#     print("Model type : ", model_class_name)
+#
+#     # Check model types
+#     is_turbo = "Turbo" in model_type
+#     is_multilingual = "Multilingual" in model_type
+#
+#     for retry in range(max_retries):
+#         try:
+#             # Clear memory before generation
+#             if retry > 0:
+#                 clear_gpu_memory()
+#                 # If retrying a NaN error, modify the seed or temperature slightly
+#                 if retry > 0:
+#                     set_seed(random.randint(1, 10000))
+#                     # Occasionally vary params to unstuck the model
+#                     if retry == max_retries - 1:
+#                         temperature = max(0.1, temperature - 0.1)
+#
+#             # Set timeout signal (only on Unix-like systems)
+#             # if hasattr(signal, 'SIGALRM'):
+#             #     signal.signal(signal.SIGALRM, timeout_handler)
+#             #     signal.alarm(timeout_seconds)
+#
+#             try:
+#                 if is_turbo:
+#                     # Turbo specific generation
+#                     # Turbo ignores exaggeration and CFG. It uses top_k (defaulting to 1000 here)
+#                     wav = model.generate(
+#                         text,
+#                         audio_prompt_path=audio_prompt_path,
+#                         temperature=temperature,
+#                         min_p=min_p,
+#                         top_p=top_p,
+#                         repetition_penalty=repetition_penalty,
+#                         top_k=1000,  # Default for Turbo
+#                         norm_loudness=True  # Turbo specific
+#                     )
+#                 elif is_multilingual:
+#                     # FIX: For multilingual model, we need to pass parameters correctly
+#                     # The alignment stream analyzer issues might be fixed by adjusting min_p and top_p
+#
+#                     # Use slightly higher min_p to avoid repetition
+#                     # adjusted_min_p = min(0.1, min_p)  # Ensure at least 0.1
+#
+#                     wav = model.generate(
+#                         text,
+#                         language_id=language_id if language_id else 'en',
+#                         audio_prompt_path=audio_prompt_path,
+#                         exaggeration=exaggeration,
+#                         temperature=temperature,
+#                         cfg_weight=0.0 if audio_prompt_path is None else 0.5,  # ⚠️ Key fix
+#                         # min_p=adjusted_min_p,
+#                         # top_p=top_p,
+#                         # repetition_penalty=repetition_penalty
+#                     )
+#                 else:
+#                     # Standard ChatterboxTTS
+#                     wav = model.generate(
+#                         text,
+#                         audio_prompt_path=audio_prompt_path,
+#                         exaggeration=exaggeration,
+#                         temperature=temperature,
+#                         cfg_weight=cfg_weight,
+#                         min_p=min_p,
+#                         top_p=top_p,
+#                         repetition_penalty=repetition_penalty
+#                     )
+#
+#                 return wav
+#
+#             except TimeoutError:
+#                 print(f"⚠️ Generation timed out after {timeout_seconds}s, retry {retry + 1}/{max_retries}")
+#                 # if hasattr(signal, 'SIGALRM'):
+#                 #     signal.alarm(0)
+#                 if retry < max_retries - 1:
+#                     continue
+#                 else:
+#                     # Return silence if all retries timeout
+#                     silence_duration = 0.5
+#                     sample_rate = getattr(model, 'sr', 24000) if model else 24000
+#                     silence_samples = int(silence_duration * sample_rate)
+#                     silence_audio = np.zeros(silence_samples, dtype=np.float32)
+#                     return torch.tensor(silence_audio).unsqueeze(0)
+#
+#         except Exception as e:
+#             # Catch RuntimeError for GPU issues AND other exceptions like librosa ParameterError (NaNs)
+#             error_str = str(e)
+#             is_cuda_error = ("srcIndex < srcSelectDimSize" in error_str or
+#                              "CUDA" in error_str or
+#                              "out of memory" in error_str.lower())
+#
+#             # Check for Librosa/NaN errors: "Audio buffer is not finite" or "input must be finite"
+#             is_nan_error = "Audio buffer is not finite" in error_str or "input must be finite" in error_str
+#
+#             if is_cuda_error or is_nan_error:
+#                 if retry < max_retries - 1:
+#                     error_type = "GPU" if is_cuda_error else "NaN/Librosa"
+#                     print(f"⚠️ {error_type} error, retry {retry + 1}/{max_retries}: {error_str[:100]}...")
+#                     clear_gpu_memory()
+#                     continue
+#                 else:
+#                     raise RuntimeError(f"Failed after {max_retries} retries: {error_str}")
+#             else:
+#                 # Rethrow unknown errors
+#                 raise e
+#
+#     raise RuntimeError("Generation failed after all retries")
+def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeration, temperature, cfg_weight,
+                        max_retries=3, min_p=0.05, top_p=1.0, repetition_penalty=1.2,
+                        model_type="English-Only (Legacy)"):
     """Generate audio with retry logic for CUDA errors, text validation, and NaN/Librosa errors"""
-    # import signal
     import numpy as np
-    
-    # Check if model is None — we cannot safely recover here because
-    # we don't know which model type the user selected.
+
     if model is None:
         raise RuntimeError(
             "❌ Model is None in generate_with_retry. Ensure a model is loaded via the model selector before generating.")
-    
-    # Validate text before generation
+
     is_valid, cleaned_text, reason = validate_text_for_generation(text)
     if not is_valid:
         print(f"⚠️ Skipping TTS generation - {reason}")
-        # Return a very short silence instead of generating static
-        silence_duration = 0.1  # 100ms of silence
+        silence_duration = 0.1
         sample_rate = getattr(model, 'sr', 24000) if model else 24000
         silence_samples = int(silence_duration * sample_rate)
         silence_audio = np.zeros(silence_samples, dtype=np.float32)
         return torch.tensor(silence_audio).unsqueeze(0)
-    
-    # Use cleaned text for generation
+
     text = cleaned_text
-    
-    # Timeout handler for hanging generation
-    # def timeout_handler(signum, frame):
-    #     raise TimeoutError("TTS generation timed out")
-    
-    # Set timeout for generation (30 seconds per chunk)
     timeout_seconds = 30
 
-    model_class_name = type(model).__name__
-
-    print("Ytpe : ", model_class_name)
-    # Check if this is the Turbo model
+    # Check model type flags
     is_turbo = "Turbo" in model_type
     is_multilingual = "Multilingual" in model_type
 
     for retry in range(max_retries):
         try:
-            # Clear memory before generation
             if retry > 0:
                 clear_gpu_memory()
-                # If retrying a NaN error, modify the seed or temperature slightly
                 if retry > 0:
                     set_seed(random.randint(1, 10000))
-                    # Occasionally vary params to unstuck the model
                     if retry == max_retries - 1:
                         temperature = max(0.1, temperature - 0.1)
 
-            # Set timeout signal (only on Unix-like systems)
-            # if hasattr(signal, 'SIGALRM'):
-            #     signal.signal(signal.SIGALRM, timeout_handler)
-            #     signal.alarm(timeout_seconds)
-
             try:
                 if is_turbo:
-                    # Turbo specific generation
-                    # Turbo ignores exaggeration and CFG. It uses top_k (defaulting to 1000 here)
                     wav = model.generate(
                         text,
                         audio_prompt_path=audio_prompt_path,
@@ -816,12 +1042,18 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                         min_p=min_p,
                         top_p=top_p,
                         repetition_penalty=repetition_penalty,
-                        top_k=1000,  # Default for Turbo
-                        norm_loudness=True  # Turbo specific
+                        top_k=1000,
+                        norm_loudness=True
                     )
                 else:
                     # Standard / Multilingual generation
                     if is_multilingual:
+                        # --- FIX FOR MULTILINGUAL ONLY ---
+                        # Force reset of the alignment analyzer state
+                        if hasattr(model, "t3"):
+                            model.t3.compiled = False
+                        # ---------------------------------
+
                         wav = model.generate(
                             text,
                             language_id=language_id if language_id else 'en',
@@ -834,7 +1066,7 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                             repetition_penalty=repetition_penalty
                         )
                     else:
-                        # Standard ChatterboxTTS — no language_id
+                        # Standard ChatterboxTTS
                         wav = model.generate(
                             text,
                             audio_prompt_path=audio_prompt_path,
@@ -847,29 +1079,24 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                         )
 
                 return wav
-            
+
             except TimeoutError:
                 print(f"⚠️ Generation timed out after {timeout_seconds}s, retry {retry + 1}/{max_retries}")
-                # if hasattr(signal, 'SIGALRM'):
-                #     signal.alarm(0)
                 if retry < max_retries - 1:
                     continue
                 else:
-                    # Return silence if all retries timeout
                     silence_duration = 0.5
                     sample_rate = getattr(model, 'sr', 24000) if model else 24000
                     silence_samples = int(silence_duration * sample_rate)
                     silence_audio = np.zeros(silence_samples, dtype=np.float32)
                     return torch.tensor(silence_audio).unsqueeze(0)
-            
+
         except Exception as e:
-            # Catch RuntimeError for GPU issues AND other exceptions like librosa ParameterError (NaNs)
             error_str = str(e)
             is_cuda_error = ("srcIndex < srcSelectDimSize" in error_str or
                              "CUDA" in error_str or
                              "out of memory" in error_str.lower())
 
-            # Check for Librosa/NaN errors: "Audio buffer is not finite" or "input must be finite"
             is_nan_error = "Audio buffer is not finite" in error_str or "input must be finite" in error_str
 
             if is_cuda_error or is_nan_error:
@@ -881,14 +1108,14 @@ def generate_with_retry(model, text, language_id, audio_prompt_path, exaggeratio
                 else:
                     raise RuntimeError(f"Failed after {max_retries} retries: {error_str}")
             else:
-                # Rethrow unknown errors
                 raise e
-    
+
     raise RuntimeError("Generation failed after all retries")
 
 def create_audiobook(
     model,
     text_content: str,
+    language_id: str,
     model_type: str,
     voice_library_path: str,
     selected_voice: str,
@@ -930,7 +1157,15 @@ def create_audiobook(
 
     # Chunk text with line breaks taking priority over sentence breaks
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
-    
+    # In create_audiobook function
+    # if "Multilingual" in model_type:
+    #     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(
+    #         text_content, max_words=20, pause_duration=0.1  # ⚠️ Reduced from 50 to 20
+    #     )
+    # else:
+    #     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(
+    #         text_content, max_words=50, pause_duration=0.1
+    #     )
     # Extract just the text parts for processing
     chunks = [chunk_data['text'] for chunk_data in chunks_with_pauses]
     total_chunks = len(chunks)
@@ -988,12 +1223,16 @@ def create_audiobook(
             status_msg = f"🎵 Processing chunk {i+1}/{total_chunks}\n🎭 Voice: {voice_config['display_name']}\n📝 Chunk {i+1}: {chunk_words} words\n📊 Progress: {i+1}/{total_chunks} chunks"
             status_updates.append(status_msg)
             # Default to 'en' language if not specified in this old function signature
-            language_id_arg = 'en'
+            # language_id_arg = 'en'
+            if "Multilingual" in model_type:
+                lang_id = language_id if language_id else 'en'
+            else:
+                lang_id = 'en'
 
             wav = generate_with_retry(
                 model,
                 chunk,
-                language_id_arg, # Pass default language
+                lang_id, # Pass default language
                 voice_config['audio_file'],
                 voice_config['exaggeration'],
                 voice_config['temperature'],
@@ -4558,6 +4797,15 @@ def create_audiobook_with_original_voice_metadata(
     from src.audiobook.processing import chunk_text_with_line_break_priority, create_silence_audio
 
     # Chunk text with line breaks taking priority over sentence breaks
+    # In create_audiobook function
+    # if "Multilingual" in model_type:
+    #     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(
+    #         text_content, max_words=20, pause_duration=0.1  # ⚠️ Reduced from 50 to 20
+    #     )
+    # else:
+    #     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(
+    #         text_content, max_words=50, pause_duration=0.1
+    #     )
     chunks_with_pauses, total_pause_duration = chunk_text_with_line_break_priority(text_content, max_words=50, pause_duration=0.1)
     
     # Extract just the text parts for processing
